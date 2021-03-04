@@ -195,7 +195,84 @@ def deposit_view(request):
 @permission_classes([IsAuthenticated])
 def withdrawal_view(request):
     response_data = {'status': '', 'data': {}}
-    pass
+    response_data = {'status': '', 'data': {}, 'message': []}
+    customer = request.user
+
+    amount = request.data.get('amount', None)
+    reference_id = request.data.get('reference_id', None)
+    if reference_id is None:
+        response_data['status'] = 'FAILED'
+        response_data['message'].append("reference_id Missing.")
+
+    # Validate Amount
+    if amount is None:
+        response_data['status'] = 'FAILED'
+        response_data['message'].append("amount Missing.")
+    else:
+        if not validate_int(amount):  # isinstance() not reliable, as isinstance("1") is false
+            response_data['status'] = 'FAILED'
+            response_data['message'].append("Invalid Amount Value. Should be Integer Value")
+        elif not int(amount) > 0:
+            response_data['status'] = 'FAILED'
+            response_data['message'].append("Amount should be greater than 0")
+
+    if not response_data['message']:
+        amount = int(amount)
+
+        wallet = fetch_wallet(customer, response_data)
+        if wallet.balance < amount:
+            response_data['status'] = 'FAILED'
+            response_data['message'].append("Insufficient balance!!")
+        if response_data['status'] == 'FAILED':
+            return JsonResponse(response_data, json_dumps_params=JSON_PARAMS)
+
+        transaction = fetch_transaction(wallet, reference_id, response_data)
+        if response_data['status'] == 'FAILED':
+            return JsonResponse(response_data, json_dumps_params=JSON_PARAMS)
+
+        transaction.amount = amount
+        transaction.type = 'WITHDRAW'
+        transaction.status = 'IP'
+        try:
+            transaction.save()
+            sleep(5)
+        except ValueError as e:
+            logger.error('Error in Withdrawal : DB Error <Attempted State = TRANSACTION_IN-PROGRESS>' + str(e.args[0]))
+            response_data['status'] = 'FAILED'
+            response_data['message'].append('Database Error')
+
+        try:
+            wallet.balance = wallet.balance - int(transaction.amount)
+            wallet.save()
+            try:
+                transaction.type = 'DX'
+                transaction.status = 'CMP'
+                transaction.save()
+                response_data['status'] = 'SUCCESS'
+                withdraw = { "status": "success",
+                            "withdrawed_by": str(wallet.customer.cxid),
+                            "amount": str(amount),
+                            "reference_id": str(reference_id)
+                            }
+                response_data['data'] = withdraw
+            except ValueError as e:
+                logger.error('Error in Withdrawal : DB Error <Attempted State = TRANSACTION_COMPLETE>' + str(e.args[0]))
+                response_data['status'] = 'FAILED'
+                response_data['message'].append('Database Error')
+        except ValueError as e:
+            logger.error('Error in Withdrawal : DB Error <Attempted State = WALLET_UPDATE>' + str(e.args[0]))
+            response_data['status'] = 'FAILED'
+            response_data['message'].append('Database Error')
+            try:
+                transaction.type = 'DEPOSIT'
+                transaction.status = 'ABORTED'
+                transaction.save()
+            except ValueError as e:
+                logger.error('Error in Withdrawal : DB Error <Attempted State = TRANSACTION_ABORT>' + str(e.args[0]))
+                response_data['status'] = 'FAILED'
+                response_data['message'].append('Database Error')
+
+    return JsonResponse(response_data, json_dumps_params=JSON_PARAMS)
 
 
 def fetch_wallet(customer, response_data):
